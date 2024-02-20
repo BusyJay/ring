@@ -71,7 +71,7 @@ impl BlockContext {
     pub(crate) fn finish(mut self, pending: &mut [u8], num_pending: usize) -> Digest {
         let block_len = self.algorithm.block_len;
         assert_eq!(pending.len(), block_len);
-        assert!(num_pending <= pending.len());
+        assert!(num_pending < pending.len());
 
         let mut padding_pos = num_pending;
         pending[padding_pos] = 0x80;
@@ -226,6 +226,30 @@ pub fn digest(algorithm: &'static Algorithm, data: &[u8]) -> Digest {
     let mut ctx = Context::new(algorithm);
     ctx.update(data);
     ctx.finish()
+}
+
+/// Same as `digest`, but expects data is aligned with the block size of the algorithm.
+///
+/// Padding can be arbitrary data, and will never be read before got overwritten by this function.
+///
+/// data may be modified by this function.
+pub fn digest_aligned(algorithm: &'static Algorithm, data: &mut [u8], len: usize) -> Digest {
+    let mut block = BlockContext::new(algorithm);
+    let aligned_len = len / algorithm.block_len * algorithm.block_len;
+    assert!(aligned_len + algorithm.block_len <= data.len());
+    if aligned_len > 0 {
+        block.update(&data[..aligned_len]);
+    }
+    if aligned_len < len {
+        block.finish(&mut data[aligned_len..aligned_len + algorithm.block_len], len - aligned_len)
+    } else {
+        block.finish(&mut data[..algorithm.block_len], 0)
+    }
+}
+
+pub fn aligned_len(algorithm: &'static Algorithm, len: usize) -> usize {
+    // There may be a waste of 1 block, but it's not worth the branch to avoid it.
+    (len / algorithm.block_len + 1) * algorithm.block_len
 }
 
 /// A calculated digest value.
