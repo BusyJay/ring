@@ -68,7 +68,8 @@ impl BlockContext {
         }
     }
 
-    pub(crate) fn finish(mut self, pending: &mut [u8], num_pending: usize) -> Digest {
+    #[inline]
+    fn partial_finish(&mut self, pending: &mut [u8], num_pending: usize) {
         let block_len = self.algorithm.block_len;
         assert_eq!(pending.len(), block_len);
         assert!(num_pending < pending.len());
@@ -99,11 +100,30 @@ impl BlockContext {
         pending[(block_len - 8)..block_len].copy_from_slice(&u64::to_be_bytes(completed_data_bits));
 
         unsafe { self.block_data_order(pending.as_ptr(), 1, cpu::features()) };
+    }
 
-        Digest {
+    #[inline]
+    fn finish_to(&mut self, pending: &mut [u8], num_pending: usize, out: &mut [u8; MAX_OUTPUT_LEN]) {
+        self.partial_finish(pending, num_pending);
+
+        (self.algorithm.format_output)(self.state, out);
+    }
+
+    #[inline]
+    fn finish_inline(&mut self, pending: &mut [u8], num_pending: usize, offset: usize) {
+        self.partial_finish(pending, num_pending);
+        (self.algorithm.format_output)(self.state, &mut pending[offset..offset + MAX_OUTPUT_LEN].try_into().unwrap())
+    }
+
+    pub(crate) fn finish(mut self, pending: &mut [u8], num_pending: usize) -> Digest {
+        let mut d = Digest {
+            value: Output([0u8; MAX_OUTPUT_LEN]),
             algorithm: self.algorithm,
-            value: (self.algorithm.format_output)(self.state),
-        }
+        };
+
+        self.finish_to(pending, num_pending, &mut d.value.0);
+        
+        d
     }
 
     unsafe fn block_data_order(
@@ -247,6 +267,26 @@ pub fn digest_aligned(algorithm: &'static Algorithm, data: &mut [u8], len: usize
     }
 }
 
+pub fn digest_aligned_to(algorithm: &'static Algorithm, data: &mut [u8], len: usize, out: &mut [u8; MAX_OUTPUT_LEN]) {
+    let mut block = BlockContext::new(algorithm);
+    let aligned_len = len / algorithm.block_len * algorithm.block_len;
+    assert!(aligned_len + algorithm.block_len <= data.len());
+    if aligned_len > 0 {
+        block.update(&data[..aligned_len]);
+    }
+    if aligned_len < len {
+        block.finish_to(&mut data[aligned_len..aligned_len + algorithm.block_len], len - aligned_len, out)
+    } else {
+        block.finish_to(&mut data[..algorithm.block_len], 0, out)
+    }
+}
+
+pub fn digest_aligned_inline(algorithm: &'static Algorithm, data: &mut [u8], len: usize, offset: usize) {
+    let mut block = BlockContext::new(algorithm);
+    assert!(len < algorithm.block_len && data.len() >= algorithm.block_len && offset + MAX_OUTPUT_LEN <= algorithm.block_len);
+    block.finish_inline(&mut data[..algorithm.block_len], len, offset)
+}
+
 pub fn aligned_len(algorithm: &'static Algorithm, len: usize) -> usize {
     // There may be a waste of 1 block, but it's not worth the branch to avoid it.
     (len / algorithm.block_len + 1) * algorithm.block_len
@@ -293,7 +333,7 @@ pub struct Algorithm {
     len_len: usize,
 
     block_data_order: unsafe extern "C" fn(state: &mut State, data: *const u8, num: c::size_t),
-    format_output: fn(input: State) -> Output,
+    format_output: fn(input: State, &mut [u8; MAX_OUTPUT_LEN]),
 
     initial_state: State,
 
@@ -493,31 +533,28 @@ pub const MAX_OUTPUT_LEN: usize = 512 / 8;
 /// algorithms in this module.
 pub const MAX_CHAINING_LEN: usize = MAX_OUTPUT_LEN;
 
-fn sha256_format_output(input: State) -> Output {
+fn sha256_format_output(input: State, output: &mut [u8; MAX_OUTPUT_LEN]) {
     let input = unsafe { input.as32 };
-    format_output::<_, _, { core::mem::size_of::<u32>() }>(input, u32::to_be_bytes)
+    format_output::<_, _, { core::mem::size_of::<u32>() }>(input, output, u32::to_be_bytes)
 }
 
-fn sha512_format_output(input: State) -> Output {
+fn sha512_format_output(input: State, output: &mut [u8; MAX_OUTPUT_LEN]) {
     let input = unsafe { input.as64 };
-    format_output::<_, _, { core::mem::size_of::<u64>() }>(input, u64::to_be_bytes)
+    format_output::<_, _, { core::mem::size_of::<u64>() }>(input, output, u64::to_be_bytes)
 }
 
 #[inline]
-fn format_output<T, F, const N: usize>(input: [Wrapping<T>; sha2::CHAINING_WORDS], f: F) -> Output
+fn format_output<T, F, const N: usize>(input: [Wrapping<T>; sha2::CHAINING_WORDS], output: &mut [u8; MAX_OUTPUT_LEN], f: F)
 where
     F: Fn(T) -> [u8; N],
     T: Copy,
 {
-    let mut output = Output([0; MAX_OUTPUT_LEN]);
     output
-        .0
         .chunks_mut(N)
         .zip(input.iter().copied().map(|Wrapping(w)| f(w)))
         .for_each(|(o, i)| {
             o.copy_from_slice(&i);
         });
-    output
 }
 
 /// The length of the output of SHA-1, in bytes.
