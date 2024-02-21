@@ -112,7 +112,7 @@ impl BlockContext {
     #[inline]
     fn finish_inline(&mut self, pending: &mut [u8], num_pending: usize, offset: usize) {
         self.partial_finish(pending, num_pending);
-        (self.algorithm.format_output)(self.state, &mut pending[offset..offset + MAX_OUTPUT_LEN].try_into().unwrap())
+        (self.algorithm.format_output)(self.state, (&mut pending[offset..offset + MAX_OUTPUT_LEN]).try_into().unwrap())
     }
 
     pub(crate) fn finish(mut self, pending: &mut [u8], num_pending: usize) -> Digest {
